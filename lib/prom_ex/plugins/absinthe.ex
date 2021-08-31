@@ -20,6 +20,12 @@ if Code.ensure_loaded?(Absinthe) do
       in your `dashboard_assigns` to the snakecase version of your prefix, the default
       `absinthe_metric_prefix` is `{otp_app}_prom_ex_absinthe`.
 
+    - `absinthe_entrypoint_tag_value_fun`: This option is OPTIONAL and is used to customise how we
+      report the value for the entrypoint label in our metrics. This function takes a
+      `%Absinthe.Blueprint.Document.Operation{}` struct and returns a string. If not specified, the
+      identifier of the first selection in the document is returned. Most of the time, this is equivalent
+      to the name of the query or mutation.
+
     This plugin exposes the following metric groups:
     - `:absinthe_execute_event_metrics`
     - `:absinthe_subscription_event_metrics`
@@ -92,10 +98,10 @@ if Code.ensure_loaded?(Absinthe) do
             reporter_options: [
               buckets: [50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 20_000]
             ],
-            tag_values: &subscription_stop_tag_values/1,
+            tag_values: &subscription_stop_tag_values(&1, opts),
             tags: event_tags,
             unit: {:native, :millisecond},
-            drop: entrypoint_in_ignore_set?(ignored_entrypoints)
+            drop: entrypoint_in_ignore_set?(ignored_entrypoints, opts)
           )
         ]
       )
@@ -122,10 +128,10 @@ if Code.ensure_loaded?(Absinthe) do
             reporter_options: [
               buckets: [50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 20_000]
             ],
-            tag_values: &operation_execute_stop_tag_values/1,
+            tag_values: &operation_execute_stop_tag_values(&1, opts),
             tags: event_tags,
             unit: {:native, :millisecond},
-            drop: entrypoint_in_ignore_set?(ignored_entrypoints)
+            drop: entrypoint_in_ignore_set?(ignored_entrypoints, opts)
           ),
 
           # Capture GraphQL request complexity
@@ -140,7 +146,7 @@ if Code.ensure_loaded?(Absinthe) do
             reporter_options: [
               buckets: [5, 10, 25, 50, 100, 200]
             ],
-            tag_values: &operation_execute_stop_tag_values/1,
+            tag_values: &operation_execute_stop_tag_values(&1, opts),
             tags: event_tags,
             drop: fn metadata ->
               metadata.blueprint
@@ -150,7 +156,7 @@ if Code.ensure_loaded?(Absinthe) do
                   true
 
                 current_operation ->
-                  entrypoint = entrypoint_from_current_operation(current_operation)
+                  entrypoint = entrypoint_from_current_operation(current_operation, opts)
                   MapSet.member?(ignored_entrypoints, entrypoint) or is_nil(current_operation.complexity)
               end
             end
@@ -160,7 +166,7 @@ if Code.ensure_loaded?(Absinthe) do
           counter(
             metric_prefix ++ [:execute, :invalid, :request, :count],
             event_name: @operation_execute_stop_event,
-            tag_values: &operation_execute_stop_tag_values/1,
+            tag_values: &operation_execute_stop_tag_values(&1, opts),
             tags: [:schema],
             keep: fn metadata ->
               metadata.blueprint.execution.validation_errors != []
@@ -170,7 +176,7 @@ if Code.ensure_loaded?(Absinthe) do
       )
     end
 
-    defp entrypoint_in_ignore_set?(ignored_entrypoints) do
+    defp entrypoint_in_ignore_set?(ignored_entrypoints, opts) do
       fn metadata ->
         metadata.blueprint
         |> Absinthe.Blueprint.current_operation()
@@ -179,13 +185,13 @@ if Code.ensure_loaded?(Absinthe) do
             true
 
           current_operation ->
-            entrypoint = entrypoint_from_current_operation(current_operation)
+            entrypoint = entrypoint_from_current_operation(current_operation, opts)
             MapSet.member?(ignored_entrypoints, entrypoint)
         end
       end
     end
 
-    defp subscription_stop_tag_values(metadata) do
+    defp subscription_stop_tag_values(metadata, opts) do
       metadata.blueprint
       |> Absinthe.Blueprint.current_operation()
       |> case do
@@ -200,12 +206,12 @@ if Code.ensure_loaded?(Absinthe) do
           %{
             schema: normalize_module_name(current_operation.schema_node.definition),
             operation_type: Map.get(current_operation, :type, :unknown),
-            entrypoint: entrypoint_from_current_operation(current_operation)
+            entrypoint: entrypoint_from_current_operation(current_operation, opts)
           }
       end
     end
 
-    defp operation_execute_stop_tag_values(metadata) do
+    defp operation_execute_stop_tag_values(metadata, opts) do
       metadata.blueprint
       |> Absinthe.Blueprint.current_operation()
       |> case do
@@ -225,12 +231,12 @@ if Code.ensure_loaded?(Absinthe) do
           %{
             schema: normalize_module_name(current_operation.schema_node.definition),
             operation_type: Map.get(current_operation, :type, :unknown),
-            entrypoint: entrypoint_from_current_operation(current_operation)
+            entrypoint: entrypoint_from_current_operation(current_operation, opts)
           }
       end
     end
 
-    defp entrypoint_from_current_operation(current_operation) do
+    defp entrypoint_from_current_operation_default_fun(current_operation) do
       current_operation.selections
       |> List.first()
       |> Map.get(:schema_node)
@@ -241,6 +247,11 @@ if Code.ensure_loaded?(Absinthe) do
         valid_entrypoint ->
           Map.get(valid_entrypoint, :identifier)
       end
+    end
+
+    defp entrypoint_from_current_operation(current_operation, opts) do
+      fun = opts[:absinthe_entrypoint_tag_value_fun] || (&entrypoint_from_current_operation_default_fun/1)
+      fun.(current_operation)
     end
 
     defp normalize_module_name(name) when is_atom(name) do
